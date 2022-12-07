@@ -13,9 +13,7 @@ import time
 # TODO: Add and document user level actions (high-level actions) and add logic to server/client
 # TODO: Add UI for client to send actions to robot.
 
-# 0 - 2048 but getting to close to the limits drains battery
-servo_min_limit = 60
-servo_max_limit = 2048 - servo_min_limit
+
 
 class Utilities:
     def clamp(x, lower, upper):
@@ -103,9 +101,6 @@ class Utilities:
         b1 = 2.17781
         return a1 * v + b1
 
-    
-
-
 class Vector3:
     def __init__(self, x, y, z):
         self.x = x
@@ -135,23 +130,56 @@ class IRArray:
         self.s_rr = s_rr
 
 class Gripper:
-    def __init__(self, is_open, open_dist, closed_dist):
-        assert open_dist < servo_max_limit
-        assert closed_dist > servo_min_limit
+    # 0 - 2048 but getting to close to the limits drains battery
+    servo_min_limit = 60
+    servo_max_limit = 2048 - servo_min_limit
+
+    def __init__(self, servo_port, is_open, open_dist, closed_dist):
+        """
+        Control the gripper actuator on the robot. Initially set the start state of the gripper.
+        @param servo_port (int) - The servo port in use.
+        @param is_open (Bolean) - True if the servo should start off as open otherwise it starts off closed.
+        @param open_dist (float) - A value indicating the servo positon of a open gripper.
+        @param closed_dist (float) - A value indicating the servo position of a closed gripper.
+        """
+        assert open_dist < Gripper.servo_max_limit
+        assert closed_dist > Gripper.servo_min_limit
         self.is_open = is_open
+        self.servo_port = servo_port
+        self.open_dist = open_dist
+        self.closed_dist = closed_dist
         # Enable servo and set state to either open_dist or closed_dist
+        kp.enable_servo(self.servo_port)
+        dist = self.open_dist if self.is_open else self.closed_dist
+        kp.set_servo_position(self.servo_port, dist)
+        kp.disable_servo()
+
+    def _set_servo_dist(self, dist):
+        """
+        Private method for setting the servo distance.
+        @param dist (int) - The servo position to set the servo to.
+        """
+        kp.enable_servo(self.servo_port)
+        kp.set_servo_position(self.servo_port, dist)
+        kp.disable_servo()
 
     def open(self):
+        """
+        Open the gripper and set the state to open.
+        """
         if self.is_open:
             return
         self.is_open = True
-        # Enable servo and set state to open_dist
+        self._set_servo_dist(self.open_dist)
 
     def close(self):
+        """
+        Close the gripper and set the state to closed.
+        """
         if not self.is_open:
             return
         self.is_open = False
-        # Enable servo and set state to closed_dist
+        self._set_servo_dist(self.closed_dist)
 
 class DifferentialDrive:
     def __init__(self, left_motor_port, right_motor_port):
@@ -209,6 +237,38 @@ class DifferentialDrive:
         current_estimate.z += (Robot.WHEEL_RADIUS / Robot.AXIS_LENGTH) * (right_dx - left_dx)
         return current_estimate
 
+    def dead_reckon_state_estimate(self, current_estimate, dt):
+        """
+        Reduced variable version of below. Keep the version below until you test both.
+        Source: https://www.cs.cmu.edu/~16311/s07/labs/NXTLabs/Lab%203.html but with variable reduction.
+        @param current_estimate (Vector3) - An estimate of the current robot's body frame.
+        @param dt (float) - The time elapsed since the last measurement.
+        @returns a Vector3 containing the new estimate.
+        """
+        vl = (kp.get_motor_position_counter(self.left_motor_port) - self.left_last_ticks) / dt
+        vl = vl * Robot.WHEEL_RADIUS * math.pi / 180.0
+        vr = (kp.get_motor_position_counter(self.right_motor_port) - self.right_last_ticks) / dt        
+        vr = vr * Robot.WHEEL_RADIUS * math.pi / 180.0
+        
+        # Calculate forward velocity and turning velocity.
+        vf = (vr + vl) / 2.0
+        omega = (vr - vl) / Robot.AXIS_LENGTH
+
+        s_x = vf * math.cos(current_estimate.z)
+        s_y = vf * math.sin(current_estimate.z)
+        s_x1 = vf * math.cos(current_estimate.z + dt * omega / 2)
+        s_y1 = vf * math.sin(current_estimate.z + dt * omega / 2)
+        s_x2 = vf * math.cos(current_estimate.z + dt * omega)
+        s_y2 = vf * math.sin(current_estimate.z + dt * omega)
+
+        current_estimate.x += (dt / 6.0) * (s_x + 4 * s_x1 + s_x2)
+        current_estimate.y += (dt / 6.0) * (s_y + 4 * s_y1 + s_y2)
+        current_estimate.z += omega * dt
+
+        return current_estimate
+
+
+
     def dead_reckon_state_change_better(self, current_estimate, dt):
         """
         Use wheel encoders to estimate the change in position from the current last estimate.
@@ -254,12 +314,42 @@ class DifferentialDrive:
         return current_estimate
 
 class Camera:
-    def __init__(self):
+    def __init__(self, camera_offset):
+        """
+        Initialize the wallaby camera and manage the camera offset from the
+        center of the robot's body frame.
+        @param camera_offset (Vector3) - Describes the camera position offset from the center of the robot.
+        """
         kp.camera_open()
         kp.camera_update()
+        self.offset = camera_offset
 
     def update(self):
         kp.camera_update()
+
+    def get_scaled_distance(self, focal_length, sensor_height, object_real_height, image_height, object_pixel_height):
+        """
+        Gets the scaled height using the unscaled distance and a ratio of focal length and sensor height.
+        """
+        return focal_length * self.unscaled_distance(object_real_height, image_height, object_pixel_height) / sensor_height
+
+    def unscaled_distance(self, object_real_height, image_height, object_pixel_height):
+        """
+        Gets the unscaled distance between the camera and a given object.
+        @param object_real_height (float) - Height of object in mm.
+        @param image_height (int) - Height of image in pixels.
+        @param object_pixel_height (int) - Height of object in pixels.
+        @returns the unscaled distance between the camera and a given object.
+        """
+        return object_real_height * image_height / object_pixel_height
+
+    def search_for_item(self, item_id):
+        """
+        Search for a box with a QR code with the given item_id and return the bearing towards it.
+        Perform exhaustive search before deciding that the box does not exist.
+        When returning the bearing towards the box, ensure that you apply the camera offset.
+        @param item_id (string) - The box QR code to search for.
+        """
 
 class BaseAction:
     def __init__(self):
