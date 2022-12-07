@@ -525,22 +525,27 @@ class MyTCPHandler(SocketServer.BaseRequestHandler):
 		self.request.sendall(self.data.upper())
 
 def robot_thread(robot, robot_lock):
-	print("test")
-	while True:
-		time.sleep(2)
-		with robot_lock:
-			if len(robot) > 0:
-				if robot[-1] == "forward":
-					kp.mav(0, 200)
-				else:
-					kp.mav(0, 0)
-			print(robot)
-                
-def server_thread(robot, robot_lock):
-	HOST, PORT = "0.0.0.0", 8100
-	server = RobotTCPServer((HOST, PORT), MyTCPHandler, robot, robot_lock)
-	server.serve_forever()
-	r_thread.join() # yikes!
+	try:
+		kp.camera_open()
+		i = 0
+		last_message = "Nothing..."
+		while True:
+			i += 1
+			if i % 20 == 0:
+				print(last_message)
+			kp.camera_update()
+			if kp.get_object_count(0) > 0:
+				last_message = kp.get_object_data(0,0)
+			else:
+				last_message = "Nothing..."
+			with robot_lock:
+				if len(robot) > 0:
+					if robot[-1] == "forward":
+						kp.mav(0, 200)
+					else:
+						kp.mav(0, 0)
+	except Exception as e:
+		print("error: " + str(e))
 
 if __name__ == "__main__":
 	sys.stdout = os.fdopen(sys.stdout.fileno(),"w",0)
