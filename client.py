@@ -2,7 +2,7 @@ import socket
 import sys
 import time
 
-HOST, PORT = "192.168.125.1", 8100
+HOST, PORT = "192.168.125.1", 8101
 data = " ".join(sys.argv[1:])
 
 # Create a socket (SOCK_STREAM means a TCP socket)
